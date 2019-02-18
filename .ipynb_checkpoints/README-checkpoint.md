@@ -461,6 +461,263 @@ t2t-exporter
 --output_dir=./train
 ```
 
+tensor2tensor gives a interest training example
+
+```
+t2t-trainer \
+  --model=transformer \
+  --hparams_set=transformer_librispeech_tpu \
+  --problem=librispeech_train_full_test_clean \
+  --train_steps=210000 \
+  --eval_steps=3 \
+  --local_eval_frequency=100 \
+  --data_dir=$DATA_DIR \
+  --output_dir=$OUT_DIR \
+  --use_tpu \
+  --cloud_tpu_name=$TPU_NAME
+```
+
+first train the model with full dataset.But not have too much long sentence.
+
+```
+t2t-trainer \
+  --model=transformer \
+  --hparams_set=transformer_librispeech_tpu \
+  --hparams=max_length=295650,max_input_seq_length=3650,max_target_seq_length=650,batch_size=6 \
+  --problem=librispeech_train_full_test_clean \
+  --train_steps=230000 \
+  --eval_steps=3 \
+  --local_eval_frequency=100 \
+  --data_dir=$DATA_DIR \
+  --output_dir=$OUT_DIR \
+  --use_tpu \
+  --cloud_tpu_name=$TPU_NAME
+```
+
+then turn down the batch_size and make the sentence longer
+
+
+### How to train on cloud-engine
+```
+# Note that both the data dir and output dir have to be on GCS
+DATA_DIR=gs://my-bucket/data
+OUTPUT_DIR=gs://my-bucket/train
+t2t-trainer \
+  --problem=translate_ende_wmt32k \
+  --model=transformer \
+  --hparams_set=transformer_base \
+  --data_dir=$DATA_DIR \
+  --output_dir=$OUTPUT_DIR \
+  --cloud_mlengine
+  --worker_gpu=8
+  --cloud_mlengine_master_type
+
+cloud_mlengine_master_type
+standard
+large_model
+get more
+https://cloud.google.com/ml-engine/reference/rest/v1/projects.jobs#traininginput
+```
+
+### How to train on TPU
+
+```
+# DATA_DIR and OUT_DIR should be GCS buckets
+# TPU_NAME should have been set automatically by the ctpu tool
+
+t2t-trainer \
+  --model=shake_shake \
+  --hparams_set=shakeshake_tpu \
+  --problem=image_cifar10 \
+  --train_steps=180000 \
+  --eval_steps=9 \
+  --local_eval_frequency=100 \
+  --data_dir=$DATA_DIR \
+  --output_dir=$OUT_DIR \
+  --use_tpu \
+  --cloud_tpu_name=$TPU_NAME
+```
+
+note:Note that because the TPUEstimator does not catch the OutOfRangeError during evaluation, you should ensure that --eval_steps is small enough to not exhaust the evaluation data.
+
+
+### How to distribute training
+
+T2T support synchronous and asynchronous distributed training.
+
+Async training is less stable than sync training
+
+Sync training is much faster on one mechine
+
+So one machine with multiple gpus is more efficient. Google alwayw use this.
+
+eval is not distribute.
+
+sync
+
+the sever info
+
+```
+# Master
+10.0.0.1:5555
+
+# Worker 1
+10.0.0.2:5555
+
+# Worker 2
+10.0.0.3:5555
+```
+
+generate the config
+
+```
+t2t-make-tf-configs --masters='10.0.0.1:5555' --ps='10.0.0.2:5555,10.0.0.3:5555'
+# output
+Assuming SYNC distributed training with a single master and 2 workers
+'{"cluster": {"master": ["10.0.0.1:5555"], "ps": ["10.0.0.2:5555", "10.0.0.3:5555"]}, "environment": "cloud", "task": {"index": 0, "type": "master"}}'      --master=grpc://10.0.0.1:5555 --ps_replicas=2 --worker_replicas=1 --worker_gpu=0 --worker_id=0 --ps_gpu=1 --sync --schedule=train --worker_job='/job:master'
+'{"cluster": {"master": ["10.0.0.1:5555"], "ps": ["10.0.0.2:5555", "10.0.0.3:5555"]}, "environment": "cloud", "task": {"index": 0, "type": "ps"}}'  --schedule=run_std_server
+'{"cluster": {"master": ["10.0.0.1:5555"], "ps": ["10.0.0.2:5555", "10.0.0.3:5555"]}, "environment": "cloud", "task": {"index": 1, "type": "ps"}}'  --schedule=run_std_server
+```
+
+run the server
+
+```
+$ export TF_CONFIG='{"cluster": {"master": ["10.0.0.1:5555"], "ps": ["10.0.0.2:5555", "10.0.0.3:5555"]}, "environment": "cloud", "task": {"index": 0, "type": "master"}}'
+$ t2t-trainer \
+    --master=grpc://10.0.0.1:5555 \
+    --ps_replicas=2 \
+    --worker_replicas=1 \
+    --worker_gpu=0 \
+    --worker_id=0 \
+    --ps_gpu=1 \
+    --sync \
+    --schedule=train \
+    --worker_job='/job:master' \
+    --model=transformer \
+    --hparams_set=transformer_base \
+    --problem=translate_ende_wmt32k
+```
+
+run the worker
+
+```
+$ export TF_CONFIG='{"cluster": {"master": ["10.0.0.1:5555"], "ps": ["10.0.0.2:5555", "10.0.0.3:5555"]}, "environment": "cloud", "task": {"index": 0, "type": "ps"}}'
+$ t2t-trainer --schedule=run_std_server
+
+$ export TF_CONFIG='{"cluster": {"master": ["10.0.0.1:5555"], "ps": ["10.0.0.2:5555", "10.0.0.3:5555"]}, "environment": "cloud", "task": {"index": 1, "type": "ps"}}'
+$ t2t-trainer --schedule=run_std_server
+
+```
+
+Async
+
+server info
+
+```
+# Worker 1
+10.0.0.1:5555
+
+# Worker 2
+10.0.0.2:5555
+
+# PS 1
+10.0.0.3:5555
+
+# PS 2
+10.0.0.4:5555
+```
+
+generate config
+
+```
+$ t2t-make-tf-configs --masters='10.0.0.1:5555,10.0.0.2:5555' --ps='10.0.0.3:5555,10.0.0.4:5555'
+
+# output
+Assuming ASYNC distributed training with 2 workers and 2 parameter servers
+'{"task": {"index": 0, "type": "chief"}, "cluster": {"chief": ["10.0.0.1:5555"], "ps": ["10.0.0.3:5555", "10.0.0.4:5555"], "worker": ["10.0.0.2:5555"]}, "environment": "cloud"}' --master=grpc://10.0.0.1:5555 --ps_replicas=2 --worker_replicas=2 --worker_gpu=1 --worker_id=0 --ps_gpu=0  --schedule=train --worker_job='/job:chief'
+'{"task": {"index": 0, "type": "worker"}, "cluster": {"chief": ["10.0.0.1:5555"], "ps": ["10.0.0.3:5555", "10.0.0.4:5555"], "worker": ["10.0.0.2:5555"]}, "environment": "cloud"}'        --master=grpc://10.0.0.2:5555 --ps_replicas=2 --worker_replicas=2 --worker_gpu=1 --worker_id=1 --ps_gpu=0 --schedule=train --worker_job='/job:worker'
+'{"task": {"index": 0, "type": "ps"}, "cluster": {"chief": ["10.0.0.1:5555"], "ps": ["10.0.0.3:5555", "10.0.0.4:5555"], "worker": ["10.0.0.2:5555"]}, "environment": "cloud"}'    --schedule=run_std_server
+'{"task": {"index": 1, "type": "ps"}, "cluster": {"chief": ["10.0.0.1:5555"], "ps": ["10.0.0.3:5555", "10.0.0.4:5555"], "worker": ["10.0.0.2:5555"]}, "environment": "cloud"}'    --schedule=run_std_server
+
+```
+
+start the worker
+
+```
+# worker1
+$ export TF_CONFIG='{"task": {"index": 0, "type": "chief"}, "cluster": {"chief": ["10.0.0.1:5555"], "ps": ["10.0.0.3:5555", "10.0.0.4:5555"], "worker": ["10.0.0.2:5555"]}, "environment": "cloud"}'
+$ t2t-trainer \
+    --master=grpc://10.0.0.1:5555 \
+    --ps_replicas=2 \
+    --worker_replicas=2 \
+    --worker_gpu=1 \
+    --worker_id=0 \
+    --ps_gpu=0 \
+    --schedule=train \
+    --worker_job='/job:chief' \
+    --model=transformer \
+    --hparams_set=transformer_base \
+    --problem=translate_ende_wmt32k
+    
+# worker2
+$ export TF_CONFIG='{"task": {"index": 0, "type": "worker"}, "cluster": {"chief": ["10.0.0.1:5555"], "ps": ["10.0.0.3:5555", "10.0.0.4:5555"], "worker": ["10.0.0.2:5555"]}, "environment": "cloud"}'
+$ t2t-trainer \
+    --master=grpc://10.0.0.2:5555 \
+    --ps_replicas=2 \
+    --worker_replicas=2 \
+    --worker_gpu=1 \
+    --worker_id=1 \
+    --ps_gpu=0 \
+    --schedule=train \
+    --worker_job='/job:worker' \
+    --model=transformer \
+    --hparams_set=transformer_base \
+    --problem=translate_ende_wmt32k
+    
+# ps1
+$ export TF_CONFIG='{"task": {"index": 0, "type": "ps"}, "cluster": {"chief": ["10.0.0.1:5555"], "ps": ["10.0.0.3:5555", "10.0.0.4:5555"], "worker": ["10.0.0.2:5555"]}, "environment": "cloud"}'
+$ t2t-trainer --schedule=run_std_server
+
+# ps2
+$ export TF_CONFIG='{"cluster": {"master": ["10.0.0.1:5555"], "ps": ["10.0.0.2:5555", "10.0.0.3:5555"]}, "environment": "cloud", "task": {"index": 1, "type": "ps"}}'
+$ t2t-trainer --schedule=run_std_server
+```
+
+
+
+### How to hyperparameter tuning
+
+```
+t2t-trainer \
+  --problem=translate_ende_wmt32k \
+  --model=transformer \
+  --hparams_set=transformer_base \
+  --data_dir=$DATA_DIR \
+  --output_dir=$OUTPUT_DIR \
+  --cloud_mlengine \
+  --hparams_range=transformer_base_range \
+  --autotune_objective='metrics-translate_ende_wmt32k/neg_log_perplexity' \
+  --autotune_maximize \
+  --autotune_max_trials=100 \
+  --autotune_parallel_trials=3
+  
+#code
+@registry.register_ranged_hparams
+def transformer_base_range(rhp):
+  """Small range of hyperparameters."""
+  # After starting from base, set intervals for some parameters.
+  rhp.set_float("learning_rate", 0.3, 3.0, scale=rhp.LOG_SCALE)
+  rhp.set_discrete("learning_rate_warmup_steps",
+                   [1000, 2000, 4000, 8000, 16000])
+  rhp.set_float("initializer_gain", 0.5, 2.0)
+  rhp.set_float("optimizer_adam_beta1", 0.85, 0.95)
+  rhp.set_float("optimizer_adam_beta2", 0.97, 0.99)
+  rhp.set_float("weight_decay", 0.0, 1e-4)
+```
+
+autotune_objective is the target. Defualt the bigger is good. you can set autotune_maximize=False to minimize it.
+
+
 ### How to install tensorflow serving
 
 On mac
@@ -516,3 +773,15 @@ https://github.com/tensorflow/tensor2tensor
 
 example
 https://tensorflow.github.io/tensor2tensor/new_problem.html
+
+googel asr model training example
+https://cloud.google.com/tpu/docs/tutorials/automated-speech-recognition
+
+cloud engine
+https://github.com/tensorflow/tensor2tensor/blob/master/docs/cloud_mlengine.md
+
+train on TPU
+https://github.com/tensorflow/tensor2tensor/blob/master/docs/cloud_tpu.md
+
+distribute training
+https://github.com/tensorflow/tensor2tensor/blob/master/docs/distributed_training.md
