@@ -197,6 +197,12 @@ Problem means your own datasets.
 
 Google has its own way to specify the problem : [task-family]_[task]_[specifics]
 
+convetion：
+tmp_dir:download and unzip file
+data_dir:generate the data and vocab file
+
+
+
 You can generate dataset simply by this code:
 
 ```
@@ -235,6 +241,8 @@ class TranslateEndeWmt8k(translate.TranslateProblem):
     return train_datasets if train else _ENDE_EVAL_DATASETS
 
 ```
+
+PROBLEM is the name of the class that was registered with @registry.register_problem, but converted from CamelCase to snake_case
 
 2、All the magic happened in problem.generate_data.
 
@@ -313,6 +321,101 @@ def length_generator(nbr_cases):
 
 note: Do not use 0 and 1. 0 for pad. 1 for the end of sentense.
 
+About text problems
+
+Tensor2tensor team has abstract three type of class:
+1、text2textproblem
+2、text2classproblem
+3、text2selfproblem (which is language modeling tasks)
+
+defualt text2textproblem use the subwordtextencoder
+
+there are some others:
+
+```
+@property
+  def vocab_type(self):
+    return text_problems.VocabType.CHARACTER
+    
+CHARACTER
+SUBWORD
+TOKEN
+```
+
+character and subword is fully revertiable
+
+subword is a trade-off between character and token.
+
+you can set the vocabulary size 
+
+```
+@property
+  def approx_vocab_size(self):
+    return 2**13  # ~8k
+```
+
+
+Another property
+
+```
+@property
+  def is_generate_per_split(self):
+    # generate_data will shard the data into TRAIN and EVAL for us.
+    return False
+
+  @property
+  def dataset_splits(self):
+    """Splits of data to produce and number of output shards for each."""
+    # 10% evaluation data
+    return [{
+        "split": problem.DatasetSplit.TRAIN,
+        "shards": 9,
+    }, {
+        "split": problem.DatasetSplit.EVAL,
+        "shards": 1,
+    }]
+```
+is_generate_per_split
+true: we have split the data and generate_samples will run on each data.
+false: we don't split the data. So please split for us.So you need to specify the shard use dataset_splits.The code means 90% for train. 10% for eval.
+
+generate_samples is for text2textproblem produce dic of inputs and targets.
+
+this is example code
+
+```
+def generate_samples(self, data_dir, tmp_dir, dataset_split):
+    del data_dir
+    del tmp_dir
+    del dataset_split
+
+    books = [
+        # bookid, skip N lines
+        (19221, 223),
+        (15553, 522),
+    ]
+
+    for (book_id, toskip) in books:
+      text = cleanup.strip_headers(acquire.load_etext(book_id)).strip()
+      lines = text.split("\n")[toskip:]
+      prev_line = None
+      ex_count = 0
+      for line in lines:
+        # Any line that is all upper case is a title or author name
+        if not line or line.upper() == line:
+          prev_line = None
+          continue
+
+        line = re.sub("[^a-z]+", " ", line.strip().lower())
+        if prev_line and line:
+          yield {
+              "inputs": prev_line,
+              "targets": line,
+          }
+          ex_count += 1
+        prev_line = line
+```
+
 TODO: Downlaod,unzip data. 
 
 ### How to define modality
@@ -331,9 +434,85 @@ Models register with
 
 ### How to define your own Hyperparameter sets
 
+### How to decoder your data
+
+```
+t2t-decoder 
+--t2t_usr_dir=self_script 
+--problem=my_problem 
+--data_dir=./self_data 
+--model=lstm_seq2seq_attention 
+--hparams_set=lstm_attention 
+--output_dir=./train 
+--decode_hparams="beam_size=4,alpha=0.6" 
+--decode_from_file=decoder/q.txt 
+--decode_to_file=decoder/a.txt
+```
+
+### How to get your trained model
+
+```
+t2t-exporter 
+--t2t_usr_dir=self_script 
+--problems=my_problem 
+--data_dir=./self_data 
+--model=lstm_seq2seq_attention 
+--hparams_set=lstm_attention 
+--output_dir=./train
+```
+
+### How to install tensorflow serving
+
+On mac
+
+```
+sudo pip install tensorflow-serving-api
+
+# install bazel
+
+# get the tensorlfow serving code
+
+git clone --recurse-submodules https://github.com/tensorflow/serving
+
+# build serving
+
+bazel build tensorflow_serving/
+
+# build entry point
+
+bazel build -c opt //tensorflow_serving/model_servers:tensorflow_model_server
+
+# set alias
+
+vim ~/.bashrc
+alias tensorflow_model_server='~/serving/bazel-bin/tensorflow_serving/model_servers/tensorflow_model_server'
+source ~/.bashrc
+
+# start server
+tensorflow_model_server 
+--port=9000 
+--model_name=lstm_seq2seq_attention 
+--model_base_path=~/self_t2t/train/export/Servo
+
+# test the server
+t2t-query-server 
+--server=127.0.0.1:9000 
+--servable_name=lstm_seq2seq_attention 
+--t2t_usr_dir=self_script 
+--problem=my_problem 
+--data_dir=./self_data
+
+
+```
+
+
+
 ### Others
 
 ### source
 
 The code base
 https://github.com/tensorflow/tensor2tensor
+
+example
+https://tensorflow.github.io/tensor2tensor/new_problem.html
